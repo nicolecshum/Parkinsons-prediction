@@ -1,0 +1,1753 @@
+---
+title: "Predicting Parkinson's progression by protein abundance"
+author: "Nicole Shum"
+date: "STA160"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# libraries
+library(ggplot2)
+library(patchwork)
+library(jsonlite)
+library(ggcorrplot)
+library(dplyr)
+library(tidyverse)
+library(GGally)
+library(corrplot)
+library(cluster)
+library(factoextra)
+library(reshape2)
+library(ggpubr)
+library(cowplot)
+library(FactoMineR)
+
+```
+
+
+```{r}
+
+# read in data
+clinical_data = read.csv("C:\\Users\\nicol\\Downloads\\amp-parkinsons-disease-progression-prediction\\train_clinical_data.csv")
+peptides_data = read.csv("C:\\Users\\nicol\\Downloads\\amp-parkinsons-disease-progression-prediction\\train_peptides.csv")
+proteins_data = read.csv("C:\\Users\\nicol\\Downloads\\amp-parkinsons-disease-progression-prediction\\train_proteins.csv")
+supp_clinical_data = read.csv("C:\\Users\\nicol\\Downloads\\amp-parkinsons-disease-progression-prediction\\supplemental_clinical_data.csv")
+
+```
+
+# Exploratory data analysis
+
+## Shape of the data
+
+```{r}
+
+### CLINICAL DATA
+
+# General information.
+
+all_clinical_data = rbind(clinical_data, supp_clinical_data)
+
+print("Dimensions of clinical data:")
+print(dim(clinical_data))
+
+print("Including supplemental data:")
+print(dim(all_clinical_data))
+
+print("Unique patients with protein data:")
+print(length(unique(clinical_data$patient_id)))
+
+print("Unique patients overall:")
+print(length(unique(all_clinical_data$patient_id)))
+
+print("Average number of visits per patient (with protein data)")
+print(mean(table(clinical_data$patient_id)))
+
+# Assume if data is missing, then there is no medication.
+clinical_data$upd23b_clinical_state_on_medication[is.na(clinical_data$upd23b_clinical_state_on_medication)] = "Off"
+clinical_data$upd23b_clinical_state_on_medication[clinical_data$upd23b_clinical_state_on_medication == ""] = "Off"
+
+# Investigate why updrs 4 is missing often. 
+
+
+# Recategorize patient ID column as character
+all_clinical_data$patient_id = as.character(all_clinical_data$patient_id)
+clinical_data$patient_id = as.character(clinical_data$patient_id)
+
+# Recategorize medication column as factor
+all_clinical_data$upd23b_clinical_state_on_medication = as.factor(all_clinical_data$upd23b_clinical_state_on_medication)
+clinical_data$upd23b_clinical_state_on_medication = as.factor(clinical_data$upd23b_clinical_state_on_medication)
+
+print(summary(all_clinical_data))
+
+
+```
+```{r}
+
+```
+
+```{r}
+
+### PROTEIN DATA
+
+# General information
+
+print("Dimensions of protein data:")
+print(dim(proteins_data))
+
+print("Unique proteins:")
+print(length(unique(proteins_data$UniProt)))
+
+print("Unique patients:")
+print(length(unique(proteins_data$patient_id)))
+
+print("Dimensions of peptide data:")
+print(dim(peptides_data))
+
+print("Unique peptides:")
+print(length(unique(peptides_data$UniProt)))
+
+print("Unique patients:")
+print(length(unique(peptides_data$patient_id)))
+
+```
+
+```{r}
+
+uniprot_data = read.delim("C:\\Users\\nicol\\Downloads\\idmapping_2025_04_30.tsv.gz", sep = "\t")
+
+uniprot_data$From = NULL
+uniprot_data$Reviewed = NULL
+
+```
+
+```{r}
+
+summary(peptides_data)
+
+```
+
+
+## Typical disease progression
+
+```{r}
+# normality, distribution
+
+# updrs 1
+shap = shapiro.test(all_clinical_data$updrs_1)
+hist_1 = ggplot(all_clinical_data, aes(x = updrs_1)) +
+  geom_histogram(bins = 15, fill = "skyblue", color = "cornflowerblue") + 
+  labs(x = "UPDRS I", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 2000) + 
+  theme_bw()
+
+# updrs 2
+shap = shapiro.test(all_clinical_data$updrs_2)
+hist_2 = ggplot(all_clinical_data, aes(x = updrs_2)) +
+  geom_histogram(bins = 15, fill = "lightgreen", color = "forestgreen") + 
+  labs(x = "UPDRS II", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 2000) +
+  theme_bw()
+
+# updrs 3
+shap = shapiro.test(all_clinical_data$updrs_3)
+hist_3 = ggplot(all_clinical_data, aes(x = updrs_3)) +
+  geom_histogram(bins = 15, fill = "hotpink", color = "maroon") + 
+  labs(x = "UPDRS III", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 2000) +
+  theme_bw()
+
+# updrs 4
+shap = shapiro.test(all_clinical_data$updrs_4)
+hist_4 = ggplot(all_clinical_data, aes(x = updrs_4)) +
+  geom_histogram(bins = 15, fill = "lavender", color = "purple") + 
+  labs(x = "UPDRS IV", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 2000) +
+  theme_bw()
+
+(hist_1 | hist_2) / (hist_3 | hist_4)
+
+# check which rows were removed by ggplot
+#updrs_1_removed = all_clinical_data[!complete.cases(all_clinical_data[, c("visit_month", "updrs_1")]), ]
+
+```
+
+
+
+
+```{r}
+# outlier detection and removal
+
+out_1 = boxplot.stats(all_clinical_data$updrs_1)$out
+out_ind_1 = which(all_clinical_data$updrs_1 %in% c(out_1))
+
+all_clinical_data = all_clinical_data[-out_ind_1, ]
+rownames(all_clinical_data) = NULL
+
+out_2 = boxplot.stats(all_clinical_data$updrs_2)$out
+out_ind_2 = which(all_clinical_data$updrs_2 %in% c(out_2))
+
+all_clinical_data = all_clinical_data[-out_ind_2, ]
+rownames(all_clinical_data) = NULL
+
+out_3 = boxplot.stats(all_clinical_data$updrs_3)$out
+out_ind_3 = which(all_clinical_data$updrs_3 %in% c(out_3))
+
+all_clinical_data = all_clinical_data[-out_ind_3, ]
+rownames(all_clinical_data) = NULL
+
+out_4 = boxplot.stats(all_clinical_data$updrs_4)$out
+out_ind_4 = which(all_clinical_data$updrs_4 %in% c(out_4))
+
+all_clinical_data = all_clinical_data[-out_ind_4, ]
+rownames(all_clinical_data) = NULL
+
+```
+
+```{r}
+
+length(unique(all_clinical_data$patient_id))
+
+```
+
+```{r}
+
+stage = c()
+for (mon in all_clinical_data$visit_month) {
+  yr = round(mon / 12, 0)
+  if (yr < 2) {
+    stage = c(stage, "early-stage")
+  } else if (yr < 6) {
+    stage = c(stage, "mid-stage")
+  } else {
+    stage = c(stage, "late-stage")
+  }
+}
+
+all_clinical_data$stage = stage
+
+```
+
+```{r}
+# normality, distribution
+
+all_clinical_data_e = all_clinical_data[which(all_clinical_data$stage == "early-stage"),]
+
+# updrs 1
+shap = shapiro.test(all_clinical_data_e$updrs_1)
+hist_1 = ggplot(all_clinical_data_e, aes(x = updrs_1)) +
+  geom_histogram(bins = 15, fill = "skyblue", color = "cornflowerblue") +
+  labs(x = "UPDRS I", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 750) + 
+  theme_bw()
+
+# updrs 2
+shap = shapiro.test(all_clinical_data_e$updrs_2)
+hist_2 = ggplot(all_clinical_data_e, aes(x = updrs_2)) +
+  geom_histogram(bins = 15, fill = "lightgreen", color = "forestgreen") + 
+  labs(x = "UPDRS II", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 750) +
+  theme_bw()
+
+# updrs 3
+shap = shapiro.test(all_clinical_data_e$updrs_3)
+hist_3 = ggplot(all_clinical_data_e, aes(x = updrs_3)) +
+  geom_histogram(bins = 15, fill = "hotpink", color = "maroon") + 
+  labs(x = "UPDRS III", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 750) +
+  theme_bw()
+
+# updrs 4
+shap = shapiro.test(all_clinical_data_e$updrs_4)
+hist_4 = ggplot(all_clinical_data_e, aes(x = updrs_4)) +
+  geom_histogram(bins = 15, fill = "lavender", color = "purple") + 
+  labs(x = "UPDRS IV", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 750) +
+  theme_bw()
+
+(hist_1 | hist_2) / (hist_3 | hist_4)
+
+# check which rows were removed by ggplot
+#updrs_1_removed = all_clinical_data[!complete.cases(all_clinical_data[, c("visit_month", "updrs_1")]), ]
+
+```
+
+
+```{r}
+
+summary(all_clinical_data$visit_month)
+
+```
+
+```{r}
+
+nopats = all_clinical_data %>%
+  select(updrs_1, updrs_2, updrs_3, updrs_4) %>%
+  na.omit()
+
+ggcorrplot(cor(nopats),
+           method = "square",
+           type = "lower",
+           lab = TRUE,          
+           lab_size = 3,          
+           colors = c("blue", "white", "red"),
+           ggtheme = ggplot2::theme_bw())
+```
+
+
+```{r, warning=FALSE}
+# calculate (per patient) summaries
+
+unique_pats = unique(all_clinical_data$patient_id)
+
+per_patient_df = data.frame()
+for (pat in unique_pats) {
+  # subset
+  pat_sub = all_clinical_data[which(all_clinical_data$patient_id == pat),]
+  
+  if (length(pat_sub$visit_month) == 1) {
+    diff_1 = 0
+    diff_2 = 0
+    diff_3 = 0
+    diff_4 = 0
+  } else {
+    # find difference between sessions
+    diffs = c()
+    for (i in 1:4) {
+      if (i == 1) {
+        values = pat_sub$updrs_1
+      } else if (i == 2) {
+        values = pat_sub$updrs_2
+      } else if (i == 3) {
+        values = pat_sub$updrs_3
+      } else if (i == 4) {
+        values = pat_sub$updrs_4
+      }
+      
+      first_sesh = min(pat_sub$visit_month[is.na(values) != TRUE])
+      last_sesh = max(pat_sub$visit_month[is.na(values) != TRUE])
+      num_betweens = length(pat_sub$visit_month) - 1
+    
+      diff = (values[pat_sub$visit_month == last_sesh] - 
+        values[pat_sub$visit_month == first_sesh]) / num_betweens
+      diffs = c(diffs, diff)
+    }
+    
+    diff_1 = diffs[1]
+    diff_2 = diffs[2]
+    diff_3 = diffs[3]
+    diff_4 = diffs[4]
+    
+  }
+  
+  med = mean(pat_sub$upd23b_clinical_state_on_medication == "On", 
+             na.rm = T) * 100
+  if (med > 0) {
+    med_sub = pat_sub[which(pat_sub$upd23b_clinical_state_on_medication == "On"),]
+    first_med = min(med_sub$visit_month)
+  } else {
+    first_med = NA
+  }
+  
+  # append data to full df
+  temp_df = data.frame(
+    patient_id = pat,
+    diff_1 = diff_1,
+    min_1 = if (is.infinite(min(pat_sub$updrs_1, na.rm = TRUE))) NA else min(pat_sub$updrs_1, na.rm = TRUE),
+    max_1 = if (is.infinite(max(pat_sub$updrs_1, na.rm = TRUE))) NA else max(pat_sub$updrs_1, na.rm = TRUE),
+    mean_1 = if (is.infinite(mean(pat_sub$updrs_1, na.rm = TRUE))) NA else mean(pat_sub$updrs_1, na.rm = TRUE),
+    diff_2 = diff_2,
+    min_2 = if (is.infinite(min(pat_sub$updrs_2, na.rm = TRUE))) NA else min(pat_sub$updrs_2, na.rm = TRUE),
+    max_2 = if (is.infinite(max(pat_sub$updrs_2, na.rm = TRUE))) NA else max(pat_sub$updrs_2, na.rm = TRUE),
+    mean_2 = if (is.infinite(mean(pat_sub$updrs_2, na.rm = TRUE))) NA else mean(pat_sub$updrs_2, na.rm = TRUE),
+    diff_3 = diff_3,
+    min_3 = if (is.infinite(min(pat_sub$updrs_3, na.rm = TRUE))) NA else min(pat_sub$updrs_3, na.rm = TRUE),
+    max_3 = if (is.infinite(max(pat_sub$updrs_3, na.rm = TRUE))) NA else max(pat_sub$updrs_3, na.rm = TRUE),
+    mean_3 = if (is.infinite(mean(pat_sub$updrs_3, na.rm = TRUE))) NA else mean(pat_sub$updrs_3, na.rm = TRUE),
+    diff_4 = diff_4,
+    min_4 = if (is.infinite(min(pat_sub$updrs_4, na.rm = TRUE))) NA else min(pat_sub$updrs_4, na.rm = TRUE),
+    max_4 = if (is.infinite(max(pat_sub$updrs_4, na.rm = TRUE))) NA else max(pat_sub$updrs_4, na.rm = TRUE),
+    mean_4 = if (is.infinite(mean(pat_sub$updrs_4, na.rm = TRUE))) NA else mean(pat_sub$updrs_4, na.rm = TRUE),
+    perc_med = med,
+    first_med = first_med,
+    num_sessions = length(pat_sub$visit_month)
+  )
+  per_patient_df = rbind(per_patient_df, temp_df)
+}
+
+summary(per_patient_df)
+
+```
+
+```{r}
+
+# distribution of per patient results
+
+# updrs 1
+shap = shapiro.test(per_patient_df$diff_1)
+hist_1 = ggplot(per_patient_df, aes(x = diff_1)) +
+  geom_histogram(bins = 25, fill = "skyblue", color = "cornflowerblue") + 
+  labs(x = "Average increase in UPDRS I/session", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 800) + 
+  theme_bw()
+
+shap = shapiro.test(per_patient_df$diff_2)
+hist_2 = ggplot(per_patient_df, aes(x = diff_2)) +
+  geom_histogram(bins = 25, fill = "lightgreen", color = "forestgreen") + 
+  labs(x = "Average increase in UPDRS II/session", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 800) + 
+  theme_bw()
+
+shap = shapiro.test(per_patient_df$diff_3)
+hist_3 = ggplot(per_patient_df, aes(x = diff_3)) +
+  geom_histogram(bins = 25, fill = "hotpink", color = "maroon") + 
+  labs(x = "Average increase in UPDRS III/session", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 800) + 
+  theme_bw()
+
+shap = shapiro.test(per_patient_df$diff_4)
+hist_4 = ggplot(per_patient_df, aes(x = diff_4)) +
+  geom_histogram(bins = 25, fill = "lavender", color = "purple") + 
+  labs(x = "Average increase in UPDRS IV/session", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 800) + 
+  theme_bw()
+
+(hist_1 | hist_2) / (hist_3 | hist_4)
+
+```
+
+```{r}
+
+# AVERAGE PER PATIENT
+
+# updrs 1
+shap = shapiro.test(per_patient_df$mean_1)
+hist_1 = ggplot(per_patient_df, aes(x = mean_1)) +
+  geom_histogram(bins = 25, fill = "skyblue", color = "cornflowerblue") + 
+  labs(x = "UPDRS I", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 125) +
+  annotate("text", label = "A", x = Inf, y = Inf, 
+           hjust = 2, vjust = 2, size = 6) +
+  theme_bw()
+
+shap = shapiro.test(per_patient_df$mean_2)
+hist_2 = ggplot(per_patient_df, aes(x = mean_2)) +
+  geom_histogram(bins = 25, fill = "lightgreen", color = "forestgreen") + 
+  labs(x = "UPDRS II", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 125) + 
+  annotate("text", label = "B", x = Inf, y = Inf, 
+           hjust = 2, vjust = 2, size = 6) +
+  theme_bw()
+
+shap = shapiro.test(per_patient_df$mean_3)
+hist_3 = ggplot(per_patient_df, aes(x = mean_3)) +
+  geom_histogram(bins = 25, fill = "hotpink", color = "maroon") + 
+  labs(x = "UPDRS III", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 125) + 
+  annotate("text", label = "C", x = Inf, y = Inf, 
+           hjust = 2, vjust = 2, size = 6) +
+  theme_bw()
+
+shap = shapiro.test(per_patient_df$mean_4)
+hist_4 = ggplot(per_patient_df, aes(x = mean_4)) +
+  geom_histogram(bins = 25, fill = "lavender", color = "purple") + 
+  labs(x = "UPDRS IV", y = "patients", caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 125) + 
+  annotate("text", label = "D", x = Inf, y = Inf, 
+           hjust = 2, vjust = 2, size = 6) +
+  theme_bw()
+
+(hist_1 | hist_2) / (hist_3 | hist_4)
+```
+
+```{r}
+
+shap = shapiro.test(per_patient_df$perc_med)
+hist_1 = ggplot(per_patient_df, aes(x = perc_med)) +
+  geom_histogram(bins = 8, fill = "gold", color = "chocolate") + 
+  labs(x = "Percent sessions on medication", y = "Patients",  caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 500) + 
+  theme_bw()
+hist_1
+
+```
+
+```{r}
+
+shap = shapiro.test(per_patient_df$num_sessions)
+hist_1 = ggplot(per_patient_df, aes(x = num_sessions)) +
+  geom_histogram(bins = 10, fill = "coral", color = "red") + 
+  labs(x = "Number of sessions", y = "Patients",  caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  ylim(0, 500) + 
+  theme_bw()
+hist_1
+
+```
+
+# Relevant proteins & peptides
+
+```{r}
+
+#proteins_data
+
+```
+
+```{r}
+
+# mean
+agg_prot_data = aggregate(NPX ~ UniProt, proteins_data, FUN = mean)
+# sd
+temp = aggregate(NPX ~ UniProt, proteins_data, FUN = sd)
+agg_prot_data = merge(agg_prot_data, temp, by = "UniProt")
+
+colnames(agg_prot_data) = c("UniProt", "Mean NPX", "SD NPX")
+
+# get names/functions
+agg_prot_data = merge(agg_prot_data, uniprot_data, by.x = "UniProt", by.y = "Entry")
+agg_prot_data = agg_prot_data[order(-agg_prot_data$`Mean NPX`), ]
+
+head(agg_prot_data)
+
+```
+
+```{r}
+agg_prot_data = agg_prot_data[order(-agg_prot_data$`SD NPX`), ]
+
+head(agg_prot_data)
+```
+
+```{r}
+
+shap = shapiro.test(log(agg_prot_data$`Mean NPX`))
+hist_1 = ggplot(agg_prot_data, aes(x = log(`Mean NPX`))) +
+  geom_histogram(bins = 20, fill = "mediumaquamarine", color = "seagreen") + 
+  labs(x = "Mean protein abundance (ln)", y = "Proteins",  caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  #ylim(0, 500) + 
+  theme_bw()
+
+shap = shapiro.test(agg_prot_data$`Mean NPX`)
+hist_2 = ggplot(agg_prot_data, aes(x = `Mean NPX`)) +
+  geom_histogram(bins = 20, fill = "darkslategray3", color = "darkslategray") + 
+  labs(x = "Mean protein abundance", y = "Proteins",  caption = paste("SW:", signif(shap$p.value, digits = 3))) +
+  #ylim(0, 500) + 
+  theme_bw()
+
+hist_1 | hist_2
+
+```
+
+```{r}
+
+# mean
+agg_prot_data_by_pat = aggregate(NPX ~ UniProt + patient_id, proteins_data, FUN = mean)
+# sd
+temp = aggregate(NPX ~ UniProt + patient_id, proteins_data, FUN = sd)
+agg_prot_data_by_pat = merge(agg_prot_data_by_pat, temp, by = c("UniProt", "patient_id"))
+
+colnames(agg_prot_data_by_pat) = c("UniProt", "patient_id", "Mean NPX", "SD NPX")
+
+
+```
+
+```{r}
+
+agg_prot_data_by_pat_agg2 = aggregate(`SD NPX` ~ UniProt, agg_prot_data_by_pat, FUN = mean)
+
+colnames(agg_prot_data_by_pat_agg2) = c("UniProt", "Mean SD NPX")
+
+agg_prot_data_by_pat_agg2 = agg_prot_data_by_pat_agg2[order(-agg_prot_data_by_pat_agg2$`Mean SD NPX`), ]
+
+head(agg_prot_data_by_pat_agg2)
+
+
+```
+
+
+```{r}
+
+summary(agg_prot_data)
+
+```
+
+# Exploration of key factors affecting disease progression
+
+Because of the 1:1 correlation between peptides and proteins, we will only look at proteins data.
+
+```{r}
+
+# Prepare data: reshape proteins to wide format
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Merge with clinical data (UPDRS scores)
+merged_protein_clinical <- clinical_data %>%
+  select(visit_id, updrs_1, updrs_2, updrs_3, updrs_4) %>%
+  inner_join(proteins_wide, by = "visit_id")
+
+# Compute correlations between proteins and UPDRS scores
+corrs = cor(merged_protein_clinical[, -1], use = "pairwise.complete.obs", method = "pearson")
+
+# Extract UPDRS protein correlations
+updrs_names <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+
+top_corrs <- lapply(updrs_names, function(updrs) {
+  # Get all correlations between this UPDRS and proteins
+  cor_vec <- corrs[updrs, !(colnames(corrs) %in% updrs_names)]
+  
+  # Sort by absolute correlation
+  cor_sorted <- sort(abs(cor_vec), decreasing = TRUE)
+  
+  # Get top 50 UniProt IDs and actual correlations (not absolute)
+  top_proteins <- names(cor_sorted)[1:50]
+  data.frame(
+    UPDRS = updrs,
+    Protein = top_proteins,
+    Correlation = cor_vec[top_proteins],
+    row.names = NULL
+  )
+})
+
+# Combine into one data frame
+top_corrs_df <- do.call(rbind, top_corrs)
+top_corrs_df
+
+```
+
+```{r}
+# mean correlation for each protein
+
+protein_names <- setdiff(colnames(corrs), updrs_names)
+mean_corrs <- sapply(updrs_names, function(updrs) {
+  mean(corrs[updrs, protein_names], na.rm = TRUE)
+})
+sd_corrs <- sapply(updrs_names, function(updrs) {
+  sd(corrs[updrs, protein_names], na.rm = TRUE)
+})
+
+mean_corrs_df <- data.frame(
+  UPDRS = names(mean_corrs),
+  MeanCorrelation = mean_corrs,
+  SDCorrelation = sd_corrs
+)
+
+mean_corrs_df
+
+```
+
+```{r}
+
+# Step 1: Filter for the 5 proteins
+selected_proteins <- top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_1")]
+
+proteins_subset <- proteins_data %>%
+  filter(UniProt %in% selected_proteins) %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge with updrs_1 from clinical data
+pca_data <- proteins_subset %>%
+  left_join(clinical_data %>% select(visit_id, updrs_1), by = "visit_id") %>%
+  drop_na()  # remove rows with missing values
+
+# Step 3: Run PCA on just the protein columns
+pca_input <- pca_data %>%
+  select(all_of(selected_proteins))
+
+pca_res <- PCA(pca_input, scale.unit = TRUE, graph = FALSE)
+
+# Step 4: Visualize PCA (color by updrs_1)
+fviz_pca_ind(pca_res,
+             label = "none",
+             habillage = cut(pca_data$updrs_1, breaks = 3),
+             addEllipses = TRUE, title = "") +
+  annotate("text", x = -Inf, y = Inf, label = "A", size = 7, hjust = -0.5, vjust = 1.5)
+
+
+
+```
+
+```{r}
+
+# Step 1: Filter for the 5 proteins
+selected_proteins <- top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_2")]
+
+proteins_subset <- proteins_data %>%
+  filter(UniProt %in% selected_proteins) %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge with updrs_2 from clinical data
+pca_data <- proteins_subset %>%
+  left_join(clinical_data %>% select(visit_id, updrs_2), by = "visit_id") %>%
+  drop_na()  # remove rows with missing values
+
+# Step 3: Run PCA on just the protein columns
+pca_input <- pca_data %>%
+  select(all_of(selected_proteins))
+
+pca_res <- PCA(pca_input, scale.unit = TRUE, graph = FALSE)
+
+# Step 4: Visualize PCA (color by updrs_2)
+fviz_pca_ind(pca_res,
+             label = "none",
+             habillage = cut(pca_data$updrs_2, breaks = 3),
+             addEllipses = TRUE,
+             title = "") +
+  annotate("text", x = -Inf, y = Inf, label = "B", size = 7, hjust = -0.5, vjust = 1.5)
+
+
+
+```
+
+
+```{r}
+
+# Step 1: Filter for the 5 proteins
+selected_proteins <- top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_3")]
+
+proteins_subset <- proteins_data %>%
+  filter(UniProt %in% selected_proteins) %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge with updrs_2 from clinical data
+pca_data <- proteins_subset %>%
+  left_join(clinical_data %>% select(visit_id, updrs_3), by = "visit_id") %>%
+  drop_na()  # remove rows with missing values
+
+# Step 3: Run PCA on just the protein columns
+pca_input <- pca_data %>%
+  select(all_of(selected_proteins))
+
+pca_res <- PCA(pca_input, scale.unit = TRUE, graph = FALSE)
+
+# Step 4: Visualize PCA (color by updrs_3)
+fviz_pca_ind(pca_res,
+             label = "none",
+             habillage = cut(pca_data$updrs_3, breaks = 3),
+             addEllipses = TRUE,
+             title = "") +
+  annotate("text", x = -Inf, y = Inf, label = "C", size = 7, hjust = -0.5, vjust = 1.5)
+
+
+
+```
+
+```{r}
+
+# Step 1: Filter for the 5 proteins
+selected_proteins <- top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_4")]
+
+proteins_subset <- proteins_data %>%
+  filter(UniProt %in% selected_proteins) %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge with updrs_2 from clinical data
+pca_data <- proteins_subset %>%
+  left_join(clinical_data %>% select(visit_id, updrs_4), by = "visit_id") %>%
+  drop_na()  # remove rows with missing values
+
+# Step 3: Run PCA on just the protein columns
+pca_input <- pca_data %>%
+  select(all_of(selected_proteins))
+
+pca_res <- PCA(pca_input, scale.unit = TRUE, graph = FALSE)
+
+# Step 4: Visualize PCA (color by updrs_4)
+fviz_pca_ind(pca_res,
+             label = "none",
+             habillage = cut(pca_data$updrs_4, breaks = 3),
+             addEllipses = TRUE,
+             title = "") +
+  annotate("text", x = -Inf, y = Inf, label = "D", size = 7, hjust = -0.5, vjust = 1.5)
+
+```
+
+# Predictive modeling
+
+```{r}
+
+library(tidyverse)
+library(xgboost)
+library(caret)
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+resultsxgb1 <- list()
+
+for (score in updrs_list) {
+  # Prepare future labels
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Modeling", score, "at +", h, "months ===\n")
+    
+    # Shift future targets
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    # Join future values with current data
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    # Skip if too little data
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    # Features and labels
+    label_col <- paste0(score, "_plus_", h)
+    feature_data <- data_h %>%
+      select(-visit_id, -patient_id, -visit_month,
+             -all_of(updrs_list), -all_of(label_col)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.)))) %>%  # Drop columns where all values are NA
+      as.matrix()
+
+    
+    label <- data_h[[label_col]]
+    
+    # Filter rows where label is not NA
+    complete_idx <- complete.cases(label)
+    feature_data <- feature_data[complete_idx, ]
+    label <- label[complete_idx]
+    
+    # Train/test split
+    set.seed(11037)
+    train_idx <- createDataPartition(label, p = 0.8, list = FALSE)
+    dtrain <- xgb.DMatrix(data = feature_data[train_idx, ], label = label[train_idx])
+    dtest <- xgb.DMatrix(data = feature_data[-train_idx, ], label = label[-train_idx])
+    
+    # Parameters
+    params <- list(
+      objective = "reg:squarederror",
+      eval_metric = "rmse",
+      max_depth = 6,
+      eta = 0.1,
+      subsample = 0.8,
+      colsample_bytree = 0.8
+    )
+    
+    # Train
+    model <- xgb.train(
+      params = params,
+      data = dtrain,
+      nrounds = 100,
+      watchlist = list(train = dtrain, test = dtest),
+      early_stopping_rounds = 10,
+      verbose = 0
+    )
+    
+    # Predict & RMSE
+    preds <- predict(model, dtest)
+    rmse <- sqrt(mean((preds - label[-train_idx])^2))
+    cat("RMSE:", round(rmse, 3), "\n")
+    
+    # Evaluate R²
+    ss_res <- sum((preds - label[-train_idx])^2)
+    ss_tot <- sum((label[-train_idx] - mean(label[-train_idx]))^2)
+    r2 <- 1 - (ss_res / ss_tot)
+    
+    cat("XGBoost RMSE:", round(rmse, 3), " | R²:", round(r2, 3), "\n")
+    
+    # Store results
+    resultsxgb1[[paste(score, h, sep = "_")]] <- list(
+      model = model,
+      rmse = rmse,
+      r2 = r2
+    )
+    
+  }
+}
+
+
+```
+```{r}
+
+selected_proteins = list(
+  updrs_1 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_1")],
+  updrs_2 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_2")],
+  updrs_3 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_3")],
+  updrs_4 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_4")]
+)
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+resultsxgb2 <- list()
+
+for (score in updrs_list) {
+  # Prepare future labels
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Modeling", score, "at +", h, "months ===\n")
+    
+    # Shift future targets
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    # Join future values with current data
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    # Skip if too little data
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    # Features and labels
+    label_col <- paste0(score, "_plus_", h)
+    
+    # Get the selected protein list for this UPDRS score
+    selected <- selected_proteins[[score]]
+    
+    # Ensure those columns exist in the data
+    selected_cols <- intersect(colnames(data_h), selected)
+    
+    # Create feature matrix using only selected protein columns
+    feature_data <- data_h %>%
+      select(all_of(selected_cols)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.)))) %>%
+      as.matrix()
+
+    
+    label <- data_h[[label_col]]
+    
+    # Filter rows where label is not NA
+    complete_idx <- complete.cases(label)
+    feature_data <- feature_data[complete_idx, ]
+    label <- label[complete_idx]
+    
+    # Train/test split
+    set.seed(11037)
+    train_idx <- createDataPartition(label, p = 0.8, list = FALSE)
+    dtrain <- xgb.DMatrix(data = feature_data[train_idx, ], label = label[train_idx])
+    dtest <- xgb.DMatrix(data = feature_data[-train_idx, ], label = label[-train_idx])
+    
+    # Parameters
+    params <- list(
+      objective = "reg:squarederror",
+      eval_metric = "rmse",
+      max_depth = 6,
+      eta = 0.1,
+      subsample = 0.8,
+      colsample_bytree = 0.8
+    )
+    
+    # Train
+    model <- xgb.train(
+      params = params,
+      data = dtrain,
+      nrounds = 100,
+      watchlist = list(train = dtrain, test = dtest),
+      early_stopping_rounds = 10,
+      verbose = 0
+    )
+    
+    # Predict & RMSE
+    preds <- predict(model, dtest)
+    rmse <- sqrt(mean((preds - label[-train_idx])^2))
+    cat("RMSE:", round(rmse, 3), "\n")
+    
+    
+    # Evaluate R²
+    ss_res <- sum((preds - label[-train_idx])^2)
+    ss_tot <- sum((label[-train_idx] - mean(label[-train_idx]))^2)
+    r2 <- 1 - (ss_res / ss_tot)
+    
+    cat("XGBoost RMSE:", round(rmse, 3), " | R²:", round(r2, 3), "\n")
+    
+    # Store results
+    resultsxgb2[[paste(score, h, sep = "_")]] <- list(
+      model = model,
+      rmse = rmse,
+      r2 = r2
+    )
+    
+  }
+}
+
+
+```
+
+```{r}
+
+rmse_results_df = data.frame(
+  model = names(resultsxgb1)
+)
+
+r2_results_df = data.frame(
+  model = names(resultsxgb1)
+)
+
+xgb1_rmse = c()
+xgb2_rmse = c()
+xgb1_r2 = c()
+xgb2_r2 = c()
+for (mod in rmse_results_df$model) {
+  res_1 = resultsxgb1[[mod]]$rmse
+  res_2 = resultsxgb2[[mod]]$rmse
+  res_r1 = resultsxgb1[[mod]]$r2
+  res_r2 = resultsxgb2[[mod]]$r2
+  
+  xgb1_rmse = c(xgb1_rmse, res_1)
+  xgb2_rmse = c(xgb2_rmse, res_2)
+  xgb1_r2 = c(xgb1_r2, res_r1)
+  xgb2_r2 = c(xgb2_r2, res_r2)
+}
+rmse_results_df$xgb1_rmse = xgb1_rmse
+rmse_results_df$xgb2_rmse = xgb2_rmse
+
+r2_results_df$xgb1_r2 = xgb1_r2
+r2_results_df$xgb2_r2 = xgb2_r2
+
+
+```
+
+```{r}
+
+library(catboost)
+
+selected_proteins = list(
+  updrs_1 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_1")],
+  updrs_2 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_2")],
+  updrs_3 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_3")],
+  updrs_4 = top_corrs_df$Protein[which(top_corrs_df$UPDRS == "updrs_4")]
+)
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+resultscat2 <- list()
+
+for (score in updrs_list) {
+  # Prepare future labels
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Modeling", score, "at +", h, "months ===\n")
+    
+    # Shift future targets
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    # Join future values with current data
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    # Skip if too little data
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    # Features and labels
+    label_col <- paste0(score, "_plus_", h)
+    
+    # Get the selected protein list for this UPDRS score
+    selected <- selected_proteins[[score]]
+    
+    # Ensure those columns exist in the data
+    selected_cols <- intersect(colnames(data_h), selected)
+    
+    # Create feature matrix using only selected protein columns
+    feature_data <- data_h %>%
+      select(all_of(selected_cols)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.)))) %>%
+      as.matrix()
+
+    
+    label <- data_h[[label_col]]
+    
+    # Filter rows where label is not NA
+    complete_idx <- complete.cases(label)
+    feature_data <- feature_data[complete_idx, ]
+    label <- label[complete_idx]
+    
+    # Convert to CatBoost Pool
+    train_pool <- catboost.load_pool(data = feature_data[train_idx, ], label = label[train_idx])
+    test_pool  <- catboost.load_pool(data = feature_data[-train_idx, ], label = label[-train_idx])
+    
+    # Set CatBoost parameters
+    params <- list(
+      loss_function = "RMSE",
+      iterations = 1000,
+      depth = 6,
+      learning_rate = 0.1,
+      random_seed = 42,
+      od_type = "Iter",
+      od_wait = 10,
+      verbose = 100
+    )
+    
+    # Train the model
+    model <- catboost.train(train_pool, test_pool, params = params)
+    
+    # Predict
+    preds <- catboost.predict(model, test_pool)
+    
+    # Evaluate RMSE
+    rmse <- sqrt(mean((preds - label[-train_idx])^2))
+    
+    # Evaluate R²
+    ss_res <- sum((preds - label[-train_idx])^2)
+    ss_tot <- sum((label[-train_idx] - mean(label[-train_idx]))^2)
+    r2 <- 1 - (ss_res / ss_tot)
+    
+    cat("CatBoost RMSE:", round(rmse, 3), " | R²:", round(r2, 3), "\n")
+    
+    # Store results
+    resultscat2[[paste(score, h, sep = "_")]] <- list(
+      model = model,
+      rmse = rmse,
+      r2 = r2
+    )
+    
+  }
+}
+
+```
+
+```{r}
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+resultscat1 <- list()
+
+for (score in updrs_list) {
+  # Prepare future labels
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Modeling", score, "at +", h, "months ===\n")
+    
+    # Shift future targets
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    # Join future values with current data
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    # Skip if too little data
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    # Features and labels
+    label_col <- paste0(score, "_plus_", h)
+    feature_data <- data_h %>%
+      select(-visit_id, -patient_id, -visit_month,
+             -all_of(updrs_list), -all_of(label_col)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.)))) %>%  # Drop columns where all values are NA
+      as.matrix()
+
+    
+    label <- data_h[[label_col]]
+    
+    # Filter rows where label is not NA
+    complete_idx <- complete.cases(label)
+    feature_data <- feature_data[complete_idx, ]
+    label <- label[complete_idx]
+    
+    # Convert to CatBoost Pool
+    train_pool <- catboost.load_pool(data = feature_data[train_idx, ], label = label[train_idx])
+    test_pool  <- catboost.load_pool(data = feature_data[-train_idx, ], label = label[-train_idx])
+    
+    # Set CatBoost parameters
+    params <- list(
+      loss_function = "RMSE",
+      iterations = 1000,
+      depth = 6,
+      learning_rate = 0.1,
+      random_seed = 42,
+      od_type = "Iter",
+      od_wait = 10,
+      verbose = 100
+    )
+    
+    # Train the model
+    model <- catboost.train(train_pool, test_pool, params = params)
+    
+    # Predict
+    preds <- catboost.predict(model, test_pool)
+    
+    # Evaluate RMSE
+    rmse <- sqrt(mean((preds - label[-train_idx])^2))
+    
+    # Evaluate R²
+    ss_res <- sum((preds - label[-train_idx])^2)
+    ss_tot <- sum((label[-train_idx] - mean(label[-train_idx]))^2)
+    r2 <- 1 - (ss_res / ss_tot)
+    
+    cat("CatBoost RMSE:", round(rmse, 3), " | R²:", round(r2, 3), "\n")
+    
+    # Store results
+    resultscat1[[paste(score, h, sep = "_")]] <- list(
+      model = model,
+      rmse = rmse,
+      r2 = r2
+    )
+    
+    print("meow :3")
+    
+  }
+}
+
+```
+
+
+```{r}
+
+cat1_rmse = c()
+cat2_rmse = c()
+cat1_r2 = c()
+cat2_r2 = c()
+for (mod in rmse_results_df$model) {
+  res_1 = resultscat1[[mod]]$rmse
+  res_2 = resultscat2[[mod]]$rmse
+  res_r1 = resultscat1[[mod]]$r2
+  res_r2 = resultscat2[[mod]]$r2
+  
+  cat1_rmse = c(cat1_rmse, res_1)
+  cat2_rmse = c(cat2_rmse, res_2)
+  cat1_r2 = c(cat1_r2, res_r1)
+  cat2_r2 = c(cat2_r2, res_r2)
+}
+rmse_results_df$cat1_rmse = cat1_rmse
+rmse_results_df$cat2_rmse = cat2_rmse
+
+r2_results_df$cat1_r2 = cat1_r2
+r2_results_df$cat2_r2 = cat2_r2
+
+
+
+```
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(glmnet)
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+results_linear <- list()
+
+for (score in updrs_list) {
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Linear Regression for", score, "at +", h, "months ===\n")
+    
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    label_col <- paste0(score, "_plus_", h)
+    feature_data <- data_h %>%
+      select(-visit_id, -patient_id, -visit_month,
+             -all_of(updrs_list), -all_of(label_col)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.))))
+    
+    label <- data_h[[label_col]]
+    
+    # Replace NAs with 0s :3
+    feature_data[is.na(feature_data)] <- 0
+    label[is.na(label)] <- 0
+    
+    # Build data frame
+    reg_data <- feature_data
+    reg_data$label <- label
+    
+    # Train/test split nya~
+    set.seed(42)
+    train_idx <- sample(seq_len(nrow(reg_data)), size = floor(0.8 * nrow(reg_data)))
+    
+    train_df <- reg_data[train_idx, ]
+    test_df  <- reg_data[-train_idx, ]
+    
+    # Fit linear regression nya~
+    formula_str <- paste("label ~", paste(names(feature_data), collapse = " + "))
+    model <- glm(as.formula(formula_str), data = train_df, family = gaussian)
+    
+    # Predict on test set
+    preds <- predict(model, newdata = test_df)
+    actual <- test_df$label
+    
+    # Calculate RMSE
+    rmse <- sqrt(mean((preds - actual)^2))
+    
+    # Calculate R^2
+    ss_res <- sum((preds - actual)^2)
+    ss_tot <- sum((actual - mean(actual))^2)
+    r2 <- 1 - (ss_res / ss_tot)
+    
+    cat("Linear Regression RMSE:", round(rmse, 3), " | R²:", round(r2, 3), "\n")
+    
+    results_linear[[paste(score, h, sep = "_")]] <- list(
+      model = model,
+      rmse = rmse,
+      r2 = r2
+    )
+    
+    print("nya~ Regression done for this one! 🐾")
+  }
+}
+
+
+```
+
+
+```{r}
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+resultscat1 <- list()
+
+ensemble_weight <- 0.5
+
+for (score in updrs_list) {
+  # Prepare future labels
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Modeling", score, "at +", h, "months ===\n")
+    
+    # Shift future targets
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    # Join future values with current data
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    # Skip if too little data
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    # Features and labels
+    label_col <- paste0(score, "_plus_", h)
+    feature_data <- data_h %>%
+      select(-visit_id, -patient_id, -visit_month,
+             -all_of(updrs_list), -all_of(label_col)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.)))) %>%  # Drop columns where all values are NA
+      as.matrix()
+
+    
+    label <- data_h[[label_col]]
+    
+    # Replace NAs with 0s :3
+    feature_data[is.na(feature_data)] <- 0
+    label[is.na(label)] <- 0
+    
+    # Filter rows where label is not NA
+    complete_idx <- complete.cases(label)
+    feature_data <- feature_data[complete_idx, ]
+    label <- label[complete_idx]
+    
+    # Convert to CatBoost Pool
+    train_pool <- catboost.load_pool(data = feature_data[train_idx, ], label = label[train_idx])
+    test_pool  <- catboost.load_pool(data = feature_data[-train_idx, ], label = label[-train_idx])
+    
+    # Set CatBoost parameters
+    params <- list(
+      loss_function = "RMSE",
+      iterations = 1000,
+      depth = 6,
+      learning_rate = 0.1,
+      random_seed = 42,
+      od_type = "Iter",
+      od_wait = 10,
+      verbose = 100
+    )
+    
+    
+    
+    df_lm <- as.data.frame(feature_data)
+    df_lm$label <- label
+    
+    # Train models
+    model_cb <- catboost.train(train_pool, test_pool, params = params)
+    preds_cb <- catboost.predict(model_cb, test_pool)
+    
+    lm_model <- lm(label ~ ., data = df_lm[train_idx, ])
+    preds_lm <- predict(lm_model, newdata = df_lm[-train_idx, ])
+    
+    # Ensemble prediction (weighted average)
+    preds_ensemble <- ensemble_weight * preds_cb + (1 - ensemble_weight) * preds_lm
+    
+    # Evaluate ensemble metrics
+    rmse_ensemble <- sqrt(mean((preds_ensemble - label[-train_idx])^2))
+    ss_res_ensemble <- sum((preds_ensemble - label[-train_idx])^2)
+    ss_tot_ensemble <- sum((label[-train_idx] - mean(label[-train_idx]))^2)
+    r2_ensemble <- 1 - (ss_res_ensemble / ss_tot_ensemble)
+    
+    cat("Ensemble RMSE:", round(rmse_ensemble, 3), "| R²:", round(r2_ensemble, 3), "\n")
+    
+    # Store ensemble results
+    resultscat1[[paste(score, h, sep = "_")]]$ensemble <- list(
+      rmse = rmse_ensemble,
+      r2 = r2_ensemble
+    )
+    
+    print("meow~ Ensemble done! 🐾")
+    
+  }
+}
+
+```
+
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(glmnet)
+
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+threshold <- 1  # Customize threshold for progression
+
+resultsglm <- list()
+
+for (score in updrs_list) {
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+  
+  for (h in future_times) {
+    cat("\n=== Logistic Regression for", score, "at +", h, "months ===\n")
+    
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+    
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+    
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+    
+    label_col <- paste0(score, "_plus_", h)
+    feature_data <- data_h %>%
+      select(-visit_id, -patient_id, -visit_month,
+             -all_of(updrs_list), -all_of(label_col)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.))))
+    
+    label <- data_h[[label_col]]
+    
+    # Binarize label
+    label_bin <- ifelse(label > threshold, 1, 0)
+    
+    feature_data[is.na(feature_data)] <- 0
+    label_bin[is.na(label_bin)] <- 0
+    
+    if (length(unique(label_bin)) < 2) {
+      cat("Skipping: not enough class variation\n")
+      next
+    }
+    
+    # Create data frame for glm
+    glm_data <- feature_data
+    glm_data$label_bin <- as.factor(label_bin)
+    
+    # Split into train/test
+    set.seed(42)
+    train_idx <- sample(seq_len(nrow(glm_data)), size = floor(0.8 * nrow(glm_data)))
+    
+    train_df <- glm_data[train_idx, ]
+    test_df  <- glm_data[-train_idx, ]
+    
+    # Convert to matrix (glmnet needs matrix input)
+    x <- as.matrix(feature_data)
+    y <- as.numeric(label_bin)
+
+    # Fit logistic regression with L2 regularization (Ridge)
+    model <- glmnet(x[train_idx, ], y[train_idx], family = "binomial", alpha = 0)  # alpha=0 for ridge
+    
+    # Predict
+    probs <- predict(model, newx = x[-train_idx, ], type = "response", s = 0.01)  # s is lambda
+    preds <- ifelse(probs > 0.5, 1, 0)
+    
+    # Fit logistic regression model
+    formula_str <- paste("label_bin ~", paste(names(feature_data), collapse = " + "))
+    model <- glm(as.formula(formula_str), data = train_df, family = binomial)
+    
+    # Predict probabilities and labels
+    probs <- predict(model, newdata = test_df, type = "response")
+    preds <- ifelse(probs > 0.5, 1, 0)
+    actual <- as.numeric(as.character(test_df$label_bin))
+    
+    # Evaluate accuracy
+    accuracy <- mean(preds == actual)
+    
+    cat("Logistic Regression Accuracy:", round(accuracy, 3), "\n")
+    
+    # Store results
+    resultsglm[[paste(score, h, sep = "_")]] <- list(
+      model = model,
+      accuracy = accuracy
+    )
+    
+    print("woof :3")
+  }
+}
+
+
+```
+```{r}
+
+library(catboost)
+library(dplyr)
+library(tidyr)
+
+# Step 1: Reshape protein data wide
+proteins_wide <- proteins_data %>%
+  select(visit_id, UniProt, NPX) %>%
+  pivot_wider(names_from = UniProt, values_from = NPX)
+
+# Step 2: Merge proteins with clinical data
+clinical_vars <- c("visit_id", "patient_id", "visit_month", "updrs_1", "updrs_2", "updrs_3", "updrs_4")
+data_full <- proteins_wide %>%
+  left_join(clinical_data %>% select(all_of(clinical_vars)), by = "visit_id")
+
+# Step 3: Setup
+updrs_list <- c("updrs_1", "updrs_2", "updrs_3", "updrs_4")
+future_times <- c(6, 12, 18)
+
+resultscat1 <- list()
+
+## TESTING:
+updrs_list <- c("updrs_1")
+future_times <- c(6)
+
+for (score in updrs_list) {
+  future_targets <- clinical_data %>%
+    select(patient_id, visit_month, !!sym(score)) %>%
+    rename(future_value = !!sym(score))
+
+  for (h in future_times) {
+    cat("\n=== Modeling", score, "at +", h, "months ===\n")
+
+    shifted <- future_targets %>%
+      mutate(visit_month = visit_month - h) %>%
+      rename(!!paste0(score, "_plus_", h) := future_value)
+
+    data_h <- data_full %>%
+      inner_join(shifted, by = c("patient_id", "visit_month"))
+
+    if (nrow(data_h) < 50) {
+      cat("Skipping: too few observations\n")
+      next
+    }
+
+    label_col <- paste0(score, "_plus_", h)
+    feature_data <- data_h %>%
+      select(-visit_id, -patient_id, -visit_month,
+             -all_of(updrs_list), -all_of(label_col)) %>%
+      select(where(is.numeric)) %>%
+      select(where(~ !all(is.na(.)))) %>%
+      as.data.frame()
+
+    label <- data_h[[label_col]]
+
+    complete_idx <- complete.cases(label)
+    feature_data <- feature_data[complete_idx, ]
+    label <- label[complete_idx]
+
+    # Train/test split
+    set.seed(42)
+    train_idx <- sample(seq_len(nrow(feature_data)), size = floor(0.8 * nrow(feature_data)))
+    test_idx <- setdiff(seq_len(nrow(feature_data)), train_idx)
+
+    train_pool <- catboost.load_pool(data = feature_data[train_idx, ], label = label[train_idx])
+    test_pool  <- catboost.load_pool(data = feature_data[test_idx, ], label = label[test_idx])
+
+    # Grid of hyperparameters
+    params_grid <- expand.grid(
+      depth = c(4, 6, 8),
+      learning_rate = c(0.01, 0.05, 0.1),
+      iterations = c(300, 500),
+      l2_leaf_reg = c(1, 3, 5)
+    )
+
+    best_rmse <- Inf
+    best_model <- NULL
+    best_r2 <- NA
+    best_params <- NULL
+
+    for (i in 1:nrow(params_grid)) {
+      params <- list(
+        loss_function = "RMSE",
+        depth = params_grid$depth[i],
+        learning_rate = params_grid$learning_rate[i],
+        iterations = params_grid$iterations[i],
+        l2_leaf_reg = params_grid$l2_leaf_reg[i],
+        random_seed = 42,
+        verbose = 0
+      )
+
+      model <- catboost.train(train_pool, test_pool, params = params)
+      preds <- catboost.predict(model, test_pool)
+
+      rmse <- sqrt(mean((preds - label[test_idx])^2))
+      ss_res <- sum((preds - label[test_idx])^2)
+      ss_tot <- sum((label[test_idx] - mean(label[test_idx]))^2)
+      r2 <- 1 - (ss_res / ss_tot)
+
+      cat(sprintf("Grid %d: RMSE = %.3f, R² = %.3f | depth = %d, lr = %.2f, iter = %d, reg = %.1f\n",
+                  i, rmse, r2,
+                  params$depth, params$learning_rate, params$iterations, params$l2_leaf_reg))
+
+      if (rmse < best_rmse) {
+        best_rmse <- rmse
+        best_model <- model
+        best_r2 <- r2
+        best_params <- params
+      }
+    }
+
+    # Store best model and performance
+    resultscat1[[paste(score, h, sep = "_")]] <- list(
+      model = best_model,
+      rmse = best_rmse,
+      r2 = best_r2,
+      params = best_params
+    )
+
+    cat(sprintf("✅ Best model for %s at +%d months: RMSE = %.3f, R² = %.3f\n",
+                score, h, best_rmse, best_r2))
+    print("🎉 meow: grid search complete!\n")
+  }
+}
+
+
+
+```
